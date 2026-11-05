@@ -15,6 +15,10 @@ button{width:100%;padding:14px;font-size:16px;border:0;border-radius:10px;backgr
 #bar{height:100%;width:0;background:#2ecc71;transition:width .2s,background .2s}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px;color:#aab;margin-top:10px}
 .msg{font-size:13px;color:#fc6;min-height:18px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.row button{flex:1;min-width:46%;padding:10px;font-size:14px;margin:0;background:#3a3f4b}
+.row button.on{background:#2f7df6}
+label{font-size:13px;color:#aab;display:block;margin:4px 0}
 </style>
 </head>
 <body>
@@ -25,7 +29,15 @@ button{width:100%;padding:14px;font-size:16px;border:0;border-radius:10px;backgr
 <div class="bar"><div id="bar"></div></div>
 <div class="msg" id="msg"></div>
 <div class="grid" id="info"></div>
-<button id="recal" style="display:none;background:#444">Recalibrate</button>
+<div id="ctl" class="row" style="display:none">
+<button id="mode" class="on">Mode: FUSION</button>
+<button id="bad">Galat alarm tha</button>
+<button id="dl">Log download</button>
+<button id="recal">Recalibrate</button>
+</div>
+<label><input type="checkbox" id="normal"> Normal test (main bilkul normal hu, har alarm galat gino)</label>
+<label><input type="checkbox" id="voice" checked> Awaaz wala alert</label>
+<div class="grid" id="stats"></div>
 <p class="msg">Phone ko dashboard pe stable lagao, front camera chehre ki taraf.</p>
 
 <script type="module">
@@ -48,6 +60,7 @@ let lm,running=false,audio,lastBeep=0,lastT=-1,luma=128,lumaT=0;
 let cal={on:true,t0:null,e:[],p:[]},earTh=.2,pitchBase=0;
 let hist=[],closedSince=null,yawnSince=null,yawnCounted=false,yawns=[],nodSince=null;
 let accs=[],peaks=[],wasHigh=false;
+let fusionOn=true,voiceNext=0,events=[],rows=[],lastRow=0,above={cam:false,fus:false};
 
 // ---------- Motion sensor ----------
 addEventListener("devicemotion",e=>{
@@ -89,6 +102,19 @@ function beep(level){
   if(navigator.vibrate)navigator.vibrate(level==1?100:[300,100,300]);
 }
 
+function speak(){
+  if(!$("voice").checked||!window.speechSynthesis)return;
+  const n=performance.now();if(n<voiceNext)return;voiceNext=n+8000;
+  const u=new SpeechSynthesisUtterance("गाड़ी साइड में रोको");u.lang="hi-IN";speechSynthesis.speak(u);
+}
+function track(mode,score,t){ // har alarm ko record karo (camera-only aur fusion dono ka)
+  if(score>=CFG.l1&&!above[mode]){above[mode]=true;events.push({t:t.toFixed(1),mode,score:score.toFixed(0),bad:$("normal").checked})}
+  else if(score<CFG.l1-5)above[mode]=false;
+}
+function summary(){
+  const f=m=>{const e=events.filter(x=>x.mode===m);return `${e.length} alarm, ${e.filter(x=>x.bad).length} galat`};
+  return `Camera-only: ${f("cam")} | Fusion: ${f("fus")}`;
+}
 // ---------- Main step ----------
 function step(res,t,W,H){
   let camSig=0,camConf=0,cd=0,perclos=0,e=0,m=0,nd=0,txt="";
@@ -124,16 +150,20 @@ function step(res,t,W,H){
 
   // ---------- Confidence-weighted fusion ----------
   const wc=CFG.baseCam*camConf,wm=CFG.baseMot*motConf;
-  let score=0;
+  let sFus=0,sCam=0;
   if(!cal.on){
-    if(wc+wm>.01)score=100*(wc*camSig+wm*motSig)/(wc+wm);
-    if(cd>=CFG.microSec&&camConf>.5)score=Math.max(score,85);
+    if(wc+wm>.01)sFus=100*(wc*camSig+wm*motSig)/(wc+wm);
+    if(cd>=CFG.microSec&&camConf>.5)sFus=Math.max(sFus,85);
+    sCam=100*camSig;if(cd>=CFG.microSec)sCam=Math.max(sCam,85); // plain camera-only baseline
+    track("cam",sCam,t);track("fus",sFus,t);
   }
+  const score=fusionOn?sFus:sCam;
   let status=txt||"OK",color="#2ecc71";
   if(!cal.on){
-    if(score>=CFG.l2){status="ALARM! Gaadi side me roko";color="#e74c3c";beep(2)}
+    if(score>=CFG.l2){status="ALARM! Gaadi side me roko";color="#e74c3c";beep(2);speak()}
     else if(score>=CFG.l1){status="WARNING";color="#f5a623";beep(1)}
     else if(f)status="OK";
+    if(t-lastRow>=.5){lastRow=t;rows.push([t.toFixed(1),e.toFixed(3),perclos.toFixed(3),camSig.toFixed(3),motSig.toFixed(3),camConf.toFixed(2),motConf.toFixed(2),sCam.toFixed(0),sFus.toFixed(0)].join(","));if(rows.length>20000)rows.shift()}
   }
   $("status").textContent=status;$("status").style.color=cal.on?"#eee":color;
   $("bar").style.width=score+"%";$("bar").style.background=color;
@@ -143,8 +173,10 @@ function step(res,t,W,H){
     `MAR ${m.toFixed(2)}`,`Yawns ${yawns.length} | Nod ${nd.toFixed(1)}s`,
     `Camera signal ${camSig.toFixed(2)} | conf ${camConf.toFixed(2)}`,
     `Motion signal ${motSig.toFixed(2)} | conf ${motConf.toFixed(2)}`,
-    `Weight: camera ${share}% / motion ${100-share}%`,`Score ${score.toFixed(0)}/100`
+    fusionOn?`Weight: camera ${share}% / motion ${100-share}%`:"Mode: camera-only",
+    `Score ${score.toFixed(0)} (cam ${sCam.toFixed(0)} | fus ${sFus.toFixed(0)})`
   ].map(x=>`<div>${x}</div>`).join("");
+  $("stats").innerHTML=`<div style="grid-column:1/3;color:#eee">${summary()}</div>`;
 }
 
 function loop(){
@@ -162,6 +194,7 @@ function loop(){
 $("go").onclick=async()=>{
   try{
     audio=new (window.AudioContext||window.webkitAudioContext)();
+    if(window.speechSynthesis)speechSynthesis.speak(new SpeechSynthesisUtterance(""));
     if(window.DeviceMotionEvent&&DeviceMotionEvent.requestPermission)await DeviceMotionEvent.requestPermission();
     $("msg").textContent="Model load ho raha hai (pehli baar thoda time lagega)...";
     const fs=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
@@ -172,11 +205,18 @@ $("go").onclick=async()=>{
     const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:480,height:360},audio:false});
     $("v").srcObject=stream;await $("v").play();
     try{await navigator.wakeLock.request("screen")}catch{}
-    $("msg").textContent="";$("go").style.display="none";$("recal").style.display="block";
+    $("msg").textContent="";$("go").style.display="none";$("ctl").style.display="flex";
     running=true;loop();
   }catch(err){$("msg").textContent="Error: "+err.message}
 };
 $("recal").onclick=()=>{cal={on:true,t0:null,e:[],p:[]};hist=[];yawns=[];closedSince=yawnSince=nodSince=null};
+$("mode").onclick=()=>{fusionOn=!fusionOn;$("mode").textContent="Mode: "+(fusionOn?"FUSION":"CAMERA-ONLY");$("mode").className=fusionOn?"on":""};
+$("bad").onclick=()=>{const n=performance.now()/1000;events.forEach(x=>{if(n-x.t<10)x.bad=true})};
+$("dl").onclick=()=>{
+  const ev=events.map(x=>[x.t,x.mode,x.score,x.bad].join(",")).join("\n");
+  const txt=`# ${summary()}\ntime,ear,perclos,cam_signal,motion_signal,cam_conf,motion_conf,score_cam_only,score_fusion\n${rows.join("\n")}\n\nevent_time,mode,score,false_alarm\n${ev}\n`;
+  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([txt],{type:"text/csv"}));a.download="drowsiness_log.csv";a.click();
+};
 </script>
 </body>
 </html>
